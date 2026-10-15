@@ -1271,6 +1271,7 @@ fi
 # 8. Setting hostname and fstab
 echo "[*] Setting hostname and fstab..."
 echo "rk3562-debian" > "${ROOTFS_MNT}/etc/hostname"
+echo "CHASSIS=tablet" > "${ROOTFS_MNT}/etc/machine-info"
 
 # Record the requested build profile inside the rootfs for post-flash checks.
 cat > "${ROOTFS_MNT}/etc/rkdebian-build-profile" << PROFILE_EOF

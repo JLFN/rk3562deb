@@ -13,10 +13,16 @@ OUTPUT_DIR="${ROOT_DIR}/output"
 # Versions & URLs
 UBOOT_URL="https://github.com/Firefly-rk-linux/u-boot.git"
 UBOOT_BRANCH="rk356x/firefly-5.10"
+# Pin U-Boot: known-booting commit for RK3562
+UBOOT_COMMIT="${RKDEBIAN_UBOOT_COMMIT:-30d6e6f55d2b943c0910c3f69ccf4d302272ee71}"
 KERNEL_URL="https://github.com/rockchip-linux/kernel.git"
 KERNEL_BRANCH="develop-6.1"
+# Pin kernel: known-booting commit for RK3562 tablet (closes issue #12)
+KERNEL_COMMIT="${RKDEBIAN_KERNEL_COMMIT:-8c290990fe7b45fc7ee8ee0896fddf822ac02b54}"
 RKBIN_URL="https://github.com/rockchip-linux/rkbin.git"
 RKBIN_BRANCH="master"
+# Pin rkbin: commit known to contain working v1.07 DDR controller blob for RK3562
+RKBIN_COMMIT="${RKDEBIAN_RKBIN_COMMIT:-167d377195bfd956d679027b742bad9a68ceb726}"
 
 # RK3562 configs
 UBOOT_DEFCONFIG="rk3562_defconfig"
@@ -410,14 +416,66 @@ build_uboot() {
     cd "${SRC_DIR}"
     
     if [ ! -d "rkbin" ]; then
-        git clone --depth 1 -b ${RKBIN_BRANCH} ${RKBIN_URL} rkbin
+        if [ -n "${RKBIN_COMMIT}" ]; then
+            git clone -b "${RKBIN_BRANCH}" "${RKBIN_URL}" rkbin
+        else
+            git clone --depth 1 -b "${RKBIN_BRANCH}" "${RKBIN_URL}" rkbin
+        fi
     fi
     
     if [ ! -d "u-boot" ]; then
-        git clone --depth 1 -b ${UBOOT_BRANCH} ${UBOOT_URL} u-boot
+        if [ -n "${UBOOT_COMMIT}" ]; then
+            git clone -b "${UBOOT_BRANCH}" "${UBOOT_URL}" u-boot
+        else
+            git clone --depth 1 -b "${UBOOT_BRANCH}" "${UBOOT_URL}" u-boot
+        fi
+    fi
+
+    # rkbin ownership repair so boot_merger doesn't fail with EACCES (err=13)
+    if [ "${EUID}" -ne 0 ] && [ -d "${SRC_DIR}/rkbin" ]; then
+        local rkbin_foreign=""
+        rkbin_foreign=$(find "${SRC_DIR}/rkbin" -maxdepth 2 \( ! -uid "$(id -u)" -o ! -gid "$(id -g)" \) -print -quit 2>/dev/null || true)
+        if [ -n "${rkbin_foreign}" ]; then
+            echo "[*] Repairing rkbin tree ownership..."
+            sudo chown -R "$(id -u):$(id -g)" "${SRC_DIR}/rkbin"
+        fi
+    fi
+
+    if [ -n "${RKBIN_COMMIT}" ] && [ -d "${SRC_DIR}/rkbin/.git" ]; then
+        cd "${SRC_DIR}/rkbin"
+        if git cat-file -e "${RKBIN_COMMIT}^{commit}" 2>/dev/null; then
+            if [ "$(git rev-parse HEAD)" != "${RKBIN_COMMIT}" ]; then
+                echo "[*] Pinning rkbin to ${RKBIN_COMMIT}..."
+                git checkout -q --detach "${RKBIN_COMMIT}" || {
+                    echo "[-] Error: could not check out pinned rkbin commit."; exit 1; }
+            fi
+        else
+            echo "[!] Pinned rkbin commit ${RKBIN_COMMIT} not present in this clone. Fetching..."
+            git fetch --unshallow origin 2>/dev/null || git fetch origin || true
+            git checkout -q --detach "${RKBIN_COMMIT}" || {
+                echo "[-] Error: pinned rkbin commit unavailable; delete src/rkbin and retry."; exit 1; }
+        fi
+        echo "[*] rkbin at commit: $(git rev-parse --short HEAD)"
+        cd - >/dev/null
     fi
     
     cd u-boot
+
+    if [ -n "${UBOOT_COMMIT}" ]; then
+        if git cat-file -e "${UBOOT_COMMIT}^{commit}" 2>/dev/null; then
+            if [ "$(git rev-parse HEAD)" != "${UBOOT_COMMIT}" ]; then
+                echo "[*] Pinning U-Boot to ${UBOOT_COMMIT}..."
+                git checkout -q --detach "${UBOOT_COMMIT}" || {
+                    echo "[-] Error: could not check out pinned U-Boot commit."; exit 1; }
+            fi
+        else
+            echo "[!] Pinned U-Boot commit ${UBOOT_COMMIT} not present in this clone. Fetching..."
+            git fetch --unshallow origin 2>/dev/null || git fetch origin || true
+            git checkout -q --detach "${UBOOT_COMMIT}" || {
+                echo "[-] Error: pinned U-Boot commit unavailable; delete src/u-boot and retry."; exit 1; }
+        fi
+    fi
+    echo "[*] U-Boot at commit: $(git rev-parse --short HEAD)"
 
     if [ "${EUID}" -ne 0 ]; then
         local foreign_owner=""
@@ -435,14 +493,31 @@ build_uboot() {
     ./make.sh rk3562 CROSS_COMPILE=${ABS_CROSS_COMPILE}
     
     # Store artifacts
-    local spl_loader
-    spl_loader=$(ls -1 rk3562_spl_loader_*.bin 2>/dev/null | head -n1 || true)
+    local spl_loader=""
+    if ls -1 rk3562_spl_loader_*.bin 2>/dev/null | head -n1 >/dev/null; then
+        spl_loader=$(ls -1 rk3562_spl_loader_*.bin 2>/dev/null | head -n1)
+    elif ls -1 rk3562_loader_*.bin 2>/dev/null | head -n1 >/dev/null; then
+        spl_loader=$(ls -1 rk3562_loader_*.bin 2>/dev/null | head -n1)
+    elif [ -f "idblock.bin" ]; then
+        spl_loader="idblock.bin"
+    elif [ -f "idblock.img" ]; then
+        spl_loader="idblock.img"
+    fi
+
     if [ -z "${spl_loader}" ]; then
-        echo "[-] Error: rk3562_spl_loader_*.bin not found in U-Boot output."
+        echo "[-] Error: no valid loader or idblock found in U-Boot output."
         exit 1
     fi
 
-    cp "${spl_loader}" "${OUT_DIR}/idbloader.img"
+    local magic=""
+    magic=$(head -c 4 "${spl_loader}" 2>/dev/null || true)
+    if [ "${magic}" = "RKNS" ] || [ "${magic}" = "RK35" ] || [ "${magic}" = "LDR " ]; then
+        echo "[+] Using loader artifact: ${spl_loader} (magic: ${magic})"
+        cp "${spl_loader}" "${OUT_DIR}/idbloader.img"
+    else
+        echo "[+] Using loader artifact: ${spl_loader}"
+        cp "${spl_loader}" "${OUT_DIR}/idbloader.img"
+    fi
     cp uboot.img "${OUT_DIR}/u-boot.itb"
     
     echo "[+] U-Boot build complete."
@@ -454,10 +529,30 @@ build_kernel() {
     cd "${SRC_DIR}"
     
     if [ ! -d "kernel" ]; then
-        git clone --depth 1 -b ${KERNEL_BRANCH} ${KERNEL_URL} kernel
+        if [ -n "${KERNEL_COMMIT}" ]; then
+            git clone -b "${KERNEL_BRANCH}" "${KERNEL_URL}" kernel
+        else
+            git clone --depth 1 -b "${KERNEL_BRANCH}" "${KERNEL_URL}" kernel
+        fi
     fi
 
     cd kernel
+
+    if [ -n "${KERNEL_COMMIT}" ]; then
+        if git cat-file -e "${KERNEL_COMMIT}^{commit}" 2>/dev/null; then
+            if [ "$(git rev-parse HEAD)" != "${KERNEL_COMMIT}" ]; then
+                echo "[*] Pinning kernel to ${KERNEL_COMMIT}..."
+                git checkout -q --detach "${KERNEL_COMMIT}" || {
+                    echo "[-] Error: could not check out pinned kernel commit."; exit 1; }
+            fi
+        else
+            echo "[!] Pinned kernel commit ${KERNEL_COMMIT} not present in this clone. Fetching..."
+            git fetch --unshallow origin 2>/dev/null || git fetch origin || true
+            git checkout -q --detach "${KERNEL_COMMIT}" || {
+                echo "[-] Error: pinned kernel commit unavailable; delete src/kernel and retry."; exit 1; }
+        fi
+        echo "[*] Kernel at commit: $(git rev-parse --short HEAD)"
+    fi
 
     if [ "${EUID}" -ne 0 ]; then
         local foreign_owner=""
@@ -537,6 +632,21 @@ build_kernel() {
             echo "[*] Applying RK817 boot OCV calibration fix..."
             if ! git apply --whitespace=nowarn "${rk817_boot_ocv_patch}"; then
                 echo "[-] Error: failed to apply RK817 boot OCV calibration fix."
+                exit 1
+            fi
+        fi
+    fi
+
+    # RK8xx clkout platform ID match fix:
+    # ensure "rk817-clkout" etc. subdevices match the clk driver ID table
+    local rk8xx_clkout_patch="${ROOT_DIR}/overlay/kernel-patches/rk8xx-clkout-name-match.patch"
+    if [ -f "${rk8xx_clkout_patch}" ]; then
+        if grep -q "rk817-clkout" drivers/clk/clk-rk808.c; then
+            echo "[*] RK8xx clkout name match fix already present."
+        else
+            echo "[*] Applying RK8xx clkout name match fix..."
+            if ! git apply --whitespace=nowarn "${rk8xx_clkout_patch}"; then
+                echo "[-] Error: failed to apply RK8xx clkout name match fix."
                 exit 1
             fi
         fi
@@ -740,6 +850,13 @@ create_image() {
     # source rootfs before packing the final image.
     sudo find "${OUT_DIR}/rootfs/usr/lib" -type f -path '*/NetworkManager/*/libnm-*.so' \
         -exec chown root:root {} + 2>/dev/null || true
+
+    # Ensure chassis is tablet so Phosh doesn't force portrait on lock/sleep (issue #7)
+    if [ -d "${OUT_DIR}/rootfs/etc" ]; then
+        if ! grep -q "CHASSIS=tablet" "${OUT_DIR}/rootfs/etc/machine-info" 2>/dev/null; then
+            echo "CHASSIS=tablet" | sudo tee -a "${OUT_DIR}/rootfs/etc/machine-info" >/dev/null
+        fi
+    fi
 
     sudo mkfs.ext4 -F \
         -L rootfs \

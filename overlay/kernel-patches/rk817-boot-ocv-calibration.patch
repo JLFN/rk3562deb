@@ -1,8 +1,8 @@
 diff --git a/drivers/power/supply/rk817_battery.c b/drivers/power/supply/rk817_battery.c
-index 75cf99f8d..c2d359b72 100644
+index 41bf7ea3c..3639233d5 100644
 --- a/drivers/power/supply/rk817_battery.c
 +++ b/drivers/power/supply/rk817_battery.c
-@@ -52,7 +52,16 @@ module_param_named(dbg_level, dbg_enable, int, 0644);
+@@ -51,7 +51,16 @@ module_param_named(dbg_level, dbg_enable, int, 0644);
  #define MAX_INTERPOLATE		1000
  /* Maximum Resolution Precision of Percentage: 0.001% */
  #define MAX_PERCENTAGE		(100 * 1000)
@@ -20,7 +20,49 @@ index 75cf99f8d..c2d359b72 100644
  #define OCV_SAMP_MIN_MSK	0x0c
  #define OCV_SAMP_8MIN		(0x00 << 2)
  #define MINUTE(x)	\
-@@ -1766,16 +1775,33 @@ static void rk817_bat_init_dsoc_algorithm(struct rk817_battery_device *battery)
+@@ -241,7 +250,7 @@ enum rk817_battery_fields {
+ 	RELAX_CUR1_H, RELAX_CUR1_L,
+ 	RELAX_CUR2_H, RELAX_CUR2_L,
+ 	CHRG_BAT_TAB2, CHRG_INCC_ZERO, CHRG_BATHIAUTO_EN,
+-	VOL_ADC_TSCUR_SEL_SWITCH, PWRON_VOL_H, PWRON_VOL_L,
++	VOL_ADC_TSCUR_SEL_SWITCH, OCV_VOL_H, OCV_VOL_L, PWRON_VOL_H, PWRON_VOL_L,
+ 	PWRON_CUR_H, PWRON_CUR_L,
+ 	OFF_CNT,
+ 	Q_INIT_H3, Q_INIT_H2, Q_INIT_L1, Q_INIT_L0,
+@@ -345,6 +354,8 @@ static const struct reg_field rk817_battery_reg_fields[] = {
+ 	[CHRG_BATHIAUTO_EN] = REG_FIELD(0x62, 5, 5),
+ 
+ 	[VOL_ADC_TSCUR_SEL_SWITCH] = REG_FIELD(0x66, 7, 7),
++	[OCV_VOL_H] = REG_FIELD(0x63, 0, 7),
++	[OCV_VOL_L] = REG_FIELD(0x64, 0, 7),
+ 	[PWRON_VOL_H] = REG_FIELD(0x6B, 0, 7),
+ 	[PWRON_VOL_L] = REG_FIELD(0x6C, 0, 7),
+ 	[PWRON_CUR_H] = REG_FIELD(0x6D, 0, 7),
+@@ -888,6 +899,23 @@ static void rk817_bat_set_relax_sample(struct rk817_battery_device *battery)
+ 	    __func__, pdata->sleep_enter_current, pdata->sleep_exit_current);
+ }
+ 
++/* OCV battery voltage */
++static int rk817_bat_get_ocv_voltage(struct rk817_battery_device *battery)
++{
++	int vol, val = 0, vol_temp;
++
++	val = rk817_bat_field_read(battery, OCV_VOL_H) << 8;
++	val |= rk817_bat_field_read(battery, OCV_VOL_L);
++	vol = battery->voltage_k * val / 1000 + battery->voltage_b;
++	if (battery->chip_id == RK809_ID) {
++		vol_temp = vol * battery->pdata->bat_res_up /
++			   battery->pdata->bat_res_down + vol;
++		vol = vol_temp;
++	}
++
++	return vol;
++}
++
+ /* power on battery voltage */
+ static int rk817_bat_get_pwron_voltage(struct rk817_battery_device *battery)
+ {
+@@ -2084,16 +2112,33 @@ static void rk817_bat_init_dsoc_algorithm(struct rk817_battery_device *battery)
  
  static void rk817_bat_first_pwron(struct rk817_battery_device *battery)
  {
@@ -58,7 +100,7 @@ index 75cf99f8d..c2d359b72 100644
  
  	rk817_bat_update_qmax(battery, battery->qmax);
  	rk817_bat_save_fcc(battery, battery->fcc);
-@@ -1786,6 +1812,7 @@ static void rk817_bat_first_pwron(struct rk817_battery_device *battery)
+@@ -2104,6 +2149,7 @@ static void rk817_bat_first_pwron(struct rk817_battery_device *battery)
  static void rk817_bat_not_first_pwron(struct rk817_battery_device *battery)
  {
  	int now_cap, pre_soc, pre_cap;
@@ -66,7 +108,7 @@ index 75cf99f8d..c2d359b72 100644
  
  	battery->fcc = rk817_bat_get_fcc(battery);
  	pre_soc = rk817_bat_get_prev_dsoc(battery);
-@@ -1810,6 +1837,37 @@ static void rk817_bat_not_first_pwron(struct rk817_battery_device *battery)
+@@ -2128,6 +2174,37 @@ static void rk817_bat_not_first_pwron(struct rk817_battery_device *battery)
  		BAT_INFO("initialized yet..\n");
  	}
  

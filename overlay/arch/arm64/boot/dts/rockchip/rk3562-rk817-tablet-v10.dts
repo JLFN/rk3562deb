@@ -19,6 +19,7 @@
 / {
 	model = "Rockchip RK3562 RK817 TABLET LP4 Board";
 	compatible = "rockchip,rk3562-rk817-tablet", "rockchip,rk3562";
+	chassis-type = "tablet";
 
 	adc_keys: adc-keys {
 		compatible = "adc-keys";
@@ -131,13 +132,14 @@
 	vcc_sd: vcc-sd {
 		compatible = "regulator-gpio";
 		enable-active-low;
-		enable-gpio = <&gpio0 RK_PA5 GPIO_ACTIVE_LOW>;
+		regulator-boot-on;
+		gpios = <&gpio0 RK_PA5 GPIO_ACTIVE_LOW>;
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&vcc_sd_h>;
 		regulator-name = "vcc_sd";
-		states = <3300000 0x0
+		states = <0 0x0
 			  3300000 0x1>;
 	};
 
