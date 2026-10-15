@@ -54,6 +54,7 @@ The resulting image is written to an SD card. Insert it and power on — the tab
 | **Flashlight (rear LED)** | ✅ Full (native Phosh top-menu torch toggle + brightness control via `rk-flashlightctl`) |
 | **Power button behavior** | ✅ Full (short press sleeps on release, long press >=3s opens shutdown dialog) |
 | **Lockscreen orientation memory** | ✅ Full (lock screen keeps last tablet orientation, including landscape) |
+| **Lockscreen unlock keyboard** | ✅ Full (PIN numberpad removed, virtual keyboard forced for typing `chaos`) |
 | **Cameras** | ⚠️ Partial (front `s5k5e8` + rear `s5k4h5yb` pipelines functional; color tuning still needs calibration) |
 | **Battery / Charging** | ✅ Full (RK817 PMIC) |
 | **SD card boot** | ✅ Full |
@@ -402,11 +403,20 @@ The build system creates the following accounts in the Debian image:
 | Standard user | `chaos` | `chaos` | Passwordless sudo |
 | Root | `root` | `root` | Direct root login |
 
-> **Change these on first boot:**
-> ```bash
-> passwd                   # change chaos password
-> sudo passwd root         # change root password
-> ```
+### Lock Screen & Passcode
+
+- **Default lockscreen passcode:** `chaos` (same as user password).
+- The lock screen opens directly with the on-screen virtual keyboard (Squeekboard) so you can type `chaos` to unlock. The standard numeric PIN pad has been removed to avoid confusion with alphanumeric passwords.
+- **Change password or use a numeric PIN:**
+  ```bash
+  passwd                   # set new password (use numbers only if you prefer a PIN)
+  sudo passwd root         # change root password
+  ```
+- **Optional: unlock without entering a password (swipe up to unlock):**
+  ```bash
+  gsettings set sm.puri.phosh.lockscreen require-unlock false
+  ```
+
 
 ---
 

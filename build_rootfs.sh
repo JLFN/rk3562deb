@@ -448,15 +448,22 @@ cat > /etc/dconf/db/local.d/20-rkdebian-phosh-wwan << 'PHOSH_WWAN_DCONF'
 wwan-backend='ofono'
 PHOSH_WWAN_DCONF
 
-# Keep lockscreen enabled by default.
-# (Older images disabled it as a temporary portrait-workaround.)
+# Keep lockscreen enabled by default with on-screen keyboard enabled.
 cat > /etc/dconf/db/local.d/21-rkdebian-phosh-lockscreen << 'PHOSH_LOCK_DCONF'
 [org/gnome/desktop/screensaver]
 lock-enabled=true
 
 [org/gnome/desktop/lockdown]
 disable-lock-screen=false
+
+[org/gnome/desktop/a11y/applications]
+screen-keyboard-enabled=true
+
+[sm/puri/phosh/lockscreen]
+shuffle-keypad=false
+require-unlock=true
 PHOSH_LOCK_DCONF
+
 
 # Disable GSD power-button actions so logind + custom long-press handler own
 # power-key policy without duplicate actions.
@@ -1266,6 +1273,114 @@ if [ -f "${PHOSH_BIN}" ]; then
     unset -f patch_aarch64_word
 else
     echo "[!] Warning: ${PHOSH_BIN} not found; drag-mode patch skipped."
+fi
+
+# Remove standard PIN keypad and force virtual on-screen keyboard on lockscreen (closes #10).
+# The default user password is "chaos" (alphanumeric); presenting a numeric PIN keypad confuses
+# users who do not know to tap the tiny keyboard toggle icon.
+echo "[*] Patching Phosh lockscreen: remove standard PIN keypad and force virtual keyboard..."
+if [ -f "${PHOSH_BIN}" ]; then
+    python3 - "${PHOSH_BIN}" << 'PY_PHOSH_LOCKSCREEN_PATCH'
+import sys
+
+
+phosh_path = sys.argv[1] if len(sys.argv) > 1 else "/usr/libexec/phosh"
+try:
+    with open(phosh_path, "r+b") as f:
+        data = f.read()
+
+        # 1. Force OSK when entering unlock page (carousel_page_changed_cb)
+        pat_a = bytes.fromhex("f71b00f9 d71286b9 7702178b".replace(" ", ""))
+        idx_a = data.find(pat_a)
+        if idx_a != -1:
+            curr = data[idx_a+12:idx_a+16]
+            if curr == bytes.fromhex("13000014"):
+                print("    - force OSK on unlock: already patched")
+            elif curr == bytes.fromhex("75020035"):
+                f.seek(idx_a + 12)
+                f.write(bytes.fromhex("13000014"))
+                print(f"    - force OSK on unlock: patched at 0x{idx_a+12:x}")
+            else:
+                print(f"[!] Warning: unexpected opcode at idx_a+12: {curr.hex()}")
+        else:
+            print("[!] Warning: carousel_page_changed_cb pattern not found in phosh binary")
+
+        # 2. Preserve OSK IM context when OSK visibility toggles (on_osk_visibility_changed)
+        pat_b = bytes.fromhex("a8250094 a0000034 f35341a9 fd7bc2a8 bf2303d5 c0035fd6".replace(" ", ""))
+        idx_b = data.find(pat_b)
+        if idx_b != -1:
+            f.seek(idx_b + 4)
+            f.write(bytes.fromhex("1f2003d5"))
+            print(f"    - preserve OSK IM context: patched at 0x{idx_b+4:x}")
+        else:
+            pat_b_done = bytes.fromhex("a8250094 1f2003d5 f35341a9 fd7bc2a8 bf2303d5 c0035fd6".replace(" ", ""))
+            if data.find(pat_b_done) != -1:
+                print("    - preserve OSK IM context: already patched")
+            else:
+                print("[!] Warning: on_osk_visibility_changed pattern not found in phosh binary")
+
+        # 3. Suppress keypad revealer binding in phosh_lockscreen_constructed
+        pat_c = bytes.fromhex("823e40f9 e10316aa c4008052 63030090 63600d91 f1b4fd97".replace(" ", ""))
+        idx_c = data.find(pat_c)
+        if idx_c != -1:
+            f.seek(idx_c + 20)
+            f.write(bytes.fromhex("1f2003d5"))
+            print(f"    - suppress keypad revealer binding: patched at 0x{idx_c+20:x}")
+        else:
+            pat_c_done = bytes.fromhex("823e40f9 e10316aa c4008052 63030090 63600d91 1f2003d5".replace(" ", ""))
+            if data.find(pat_c_done) != -1:
+                print("    - suppress keypad revealer binding: already patched")
+            else:
+                print("[!] Warning: phosh_lockscreen_constructed keypad binding not found in phosh binary")
+
+        # 4. Hide keypad revealer & keypad widget in UI template
+        pat_d1 = b"<object class=\"GtkRevealer\" id=\"keypad_revealer\">\n                <property name=\"visible\">1</property>"
+        repl_d1 = b"<object class=\"GtkRevealer\" id=\"keypad_revealer\">\n                <property name=\"visible\">0</property>"
+        idx_d1 = data.find(pat_d1)
+        if idx_d1 != -1:
+            f.seek(idx_d1)
+            f.write(repl_d1)
+            print(f"    - hide keypad_revealer widget: patched at 0x{idx_d1:x}")
+        else:
+            if data.find(repl_d1) != -1:
+                print("    - hide keypad_revealer widget: already patched")
+            else:
+                print("[!] Warning: keypad_revealer UI xml not found")
+
+        pat_d2 = b"<object class=\"PhoshKeypad\" id=\"keypad\">\n                    <property name=\"visible\">1</property>"
+        repl_d2 = b"<object class=\"PhoshKeypad\" id=\"keypad\">\n                    <property name=\"visible\">0</property>"
+        idx_d2 = data.find(pat_d2)
+        if idx_d2 != -1:
+            f.seek(idx_d2)
+            f.write(repl_d2)
+            print(f"    - hide keypad widget: patched at 0x{idx_d2:x}")
+        else:
+            if data.find(repl_d2) != -1:
+                print("    - hide keypad widget: already patched")
+            else:
+                print("[!] Warning: keypad widget UI xml not found")
+
+        # 5. Replace 'Enter Passcode' with 'Enter Password' (14 chars)
+        pos = 0
+        cnt_passcode = 0
+        while True:
+            idx_passcode = data.find(b"Enter Passcode", pos)
+            if idx_passcode == -1:
+                break
+            f.seek(idx_passcode)
+            f.write(b"Enter Password")
+            cnt_passcode += 1
+            pos = idx_passcode + 14
+        if cnt_passcode > 0:
+            print(f"    - replace Enter Passcode with Enter Password: {cnt_passcode} updated")
+        else:
+            if b"Enter Password" in data:
+                print("    - replace Enter Passcode with Enter Password: already patched")
+except Exception as e:
+    print(f"[!] Warning: failed to patch phosh lockscreen: {e}")
+PY_PHOSH_LOCKSCREEN_PATCH
+else
+    echo "[!] Warning: ${PHOSH_BIN} not found; lockscreen patch skipped."
 fi
 
 # 8. Setting hostname and fstab
